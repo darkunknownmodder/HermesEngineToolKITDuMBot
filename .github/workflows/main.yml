@@ -1,0 +1,37 @@
+name: Hermes Bot Premium 24/7
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: "0 */4 * * *" 
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: bot-session
+      cancel-in-progress: true 
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install pyTelegramBotAPI pymongo dnspython
+          if [ -f "hbctool-0.1.5-96-py3-none-any.whl" ]; then
+            pip install hbctool-0.1.5-96-py3-none-any.whl
+          else
+            pip install hbctool
+          fi
+
+      - name: Run Bot
+        env:
+          PYTHONUNBUFFERED: 1
+        run: python bot.py
