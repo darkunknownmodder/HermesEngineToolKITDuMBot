@@ -267,6 +267,46 @@ def broadcast(message):
 if __name__ == "__main__":
     bootstrap_engine()
     print("✨ Hermes Premium Bot is Live!")
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)"live_tasks":
+        bot.answer_callback_query(call.id, f"Current Load: {current_running_tasks}/{MAX_CONCURRENT_TASKS} Users")
+
+    elif call.data == "admin_panel" and user_id == ADMIN_ID:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📢 Broadcast", callback_data="adm_bc"), types.InlineKeyboardButton("🚫 Ban User", callback_data="adm_ban"))
+        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data="back_home"))
+        bot.edit_message_caption("<b>🛠 ADMIN CONTROL UNIT</b>\nManage users and system load here.", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+# --- ENGINE COMMANDS ---
+@bot.message_handler(commands=['disasmdem', 'asmdem'])
+def handle_tasks(message):
+    not_joined = check_join(message.from_user.id)
+    if not_joined: return bot.reply_to(message, "❌ Please /start and join our channels first!")
+    
+    if not message.reply_to_message or not message.reply_to_message.document:
+        return bot.reply_to(message, "❌ <b>Reply to a file!</b>\nFor Decompile: reply to .bundle\nFor Compile: reply to .zip")
+    
+    mode = "disasm" if message.text == "/disasmdem" else "asm"
+    status = bot.send_message(message.chat.id, "🚀 <b>Initializing Engine...</b>")
+    threading.Thread(target=process_engine, args=(mode, message, status)).start()
+
+# --- ADMIN ACTIONS ---
+@bot.message_handler(commands=['broadcast'])
+def broadcast(message):
+    if message.from_user.id != ADMIN_ID: return
+    text = message.text.replace("/broadcast ", "")
+    users = users_col.find({})
+    success = 0
+    for u in users:
+        try:
+            bot.send_message(u['user_id'], f"📢 <b>GLOBAL ANNOUNCEMENT</b>\n\n{text}")
+            success += 1
+        except: pass
+    bot.reply_to(message, f"✅ Sent to {success} users.")
+
+# --- STARTUP ---
+if __name__ == "__main__":
+    bootstrap_engine()
+    print("✨ Hermes Premium Bot is Live!")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)f} {unit}"
         size /= 1024.0
     return f"{size:.1f} TB"
