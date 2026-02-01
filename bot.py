@@ -14,49 +14,58 @@ from pymongo import MongoClient
 # --- CONFIGURATION ---
 TOKEN = "8536451561:AAFIuJAuATjo0WnzhgQAtV73mFx_0adS-kg"
 ADMIN_ID = 8504263842
-# একাধিক চ্যানেলের ইউজারনেম এখানে লিস্ট আকারে বসাও (সহজেই নতুন বাটন তৈরি হবে)
-REQUIRED_CHANNELS = ["@darkunknownmodder", "@darkunknownmodder_chat"] 
-IMG_URL = "https://raw.githubusercontent.com/darkunknownmodder/Drive-DuM/refs/heads/main/Img/Gemini_Generated_Image_rbwl3prbwl3prbwl-picsay.png"
+CHANNEL_USERNAMES = ["@darkunknownmodder", "@DarkEpicModderBD0x1"]  # ✅ Multiple channels
+CHANNEL_URLS = {
+    "@darkunknownmodder": "https://t.me/darkunknownmodder",
+    "@DarkEpicModderBD0x1": "https://t.me/DarkEpicModderBD0x1"
+}
 WHL_FILE = "hbctool-0.1.5-96-py3-none-any.whl"
+IMG_URL = "https://raw.githubusercontent.com/darkunknownmodder/Drive-DuM/refs/heads/main/Img/Gemini_Generated_Image_rbwl3prbwl3prbwl-picsay.png"
+
+# --- CONCURRENT USER LIMIT ---
+MAX_CONCURRENT_USERS = 5
+active_users = set()  # Tracks currently processing non-admin users
 
 # --- MONGODB CONNECTION ---
 raw_uri = "mongodb+srv://darkunknownmodder:" + urllib.parse.quote_plus("%#DuM404%App@#%") + "@cluster0.w2fubew.mongodb.net/?appName=Cluster0"
 client = MongoClient(raw_uri)
 db = client['hermes_ultra_db']
 users_col = db['users']
-active_tasks_col = db['active_tasks'] # লাইভ টাস্ক মনিটরিং
 
-bot = TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=50)
+bot = TeleBot(TOKEN, parse_mode="HTML", threaded=True, num_threads=40)
 logging.basicConfig(level=logging.INFO)
 
-# --- GLOBAL TRACKER ---
-MAX_CONCURRENT_TASKS = 5
-current_running_tasks = 0
-task_lock = threading.Lock()
-
 # --- UI HELPERS ---
-def get_progress_bar(percent, speed="Calculating..."):
+def get_progress_bar(percent):
     done = int(percent / 10)
-    bar = "🟢" * done + "⚪" * (10 - done)
-    return f"<b>{bar} {percent}%</b>\n🚀 <b>Speed:</b> <code>{speed}</code>"
+    bar = "█" * done + "░" * (10 - done)
+    return f"<b>{bar} {percent}%</b>"
 
 def get_main_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👤 My Profile", callback_data="my_profile"),
-        types.InlineKeyboardButton("📜 Commands", callback_data="help_cmd")
-    )
-    markup.add(
-        types.InlineKeyboardButton("📊 Bot Stats", callback_data="bot_stats"),
-        types.InlineKeyboardButton("🛰 Active Tasks", callback_data="live_tasks")
-    )
-    markup.add(types.InlineKeyboardButton("📢 Official Channel", url="https://t.me/darkunknownmodder"))
+    btn1 = types.InlineKeyboardButton("👤 My Profile", callback_data="my_profile")
+    btn2 = types.InlineKeyboardButton("📜 All Commands", callback_data="help_cmd")
+    btn3 = types.InlineKeyboardButton("📊 Bot Stats", callback_data="bot_stats")
+    btn4 = types.InlineKeyboardButton("📢 Official Channel", url=CHANNEL_URLS["@darkunknownmodder"])
+    btn5 = types.InlineKeyboardButton("👤 Developer", url=CHANNEL_URLS["@DarkEpicModderBD0x1"])
+    markup.add(btn1, btn2)
+    markup.add(btn3, btn4)
+    markup.add(btn5)
     if user_id == ADMIN_ID:
-        markup.add(types.InlineKeyboardButton("🛠 Admin Control Panel", callback_data="admin_panel"))
+        markup.add(types.InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel"))
     return markup
 
 def back_btn():
-    return types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home"))
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Back to Menu", callback_data="back_home"))
+    return markup
+
+def generate_join_markup():
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for ch in CHANNEL_USERNAMES:
+        markup.add(types.InlineKeyboardButton(f"📢 Join {ch}", url=CHANNEL_URLS[ch]))
+    markup.add(types.InlineKeyboardButton("🔄 Verify Membership", callback_data="verify"))
+    return markup
 
 # --- DATABASE LOGIC ---
 def sync_user(user):
@@ -66,168 +75,356 @@ def sync_user(user):
             "user_id": user.id,
             "username": f"@{user.username}" if user.username else "N/A",
             "name": user.first_name,
-            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "joined_at": datetime.now().strftime("%Y-%m-%d"),
             "status": "active",
             "total_tasks": 0
         }
         users_col.insert_one(user_data)
-        return True, user_data # New User
     else:
-        users_col.update_one({"user_id": user.id}, {"$set": {"name": user.first_name, "username": f"@{user.username}" if user.username else "N/A"}})
-        return False, user_data # Old User
+        users_col.update_one(
+            {"user_id": user.id},
+            {"$set": {"name": user.first_name, "username": f"@{user.username}" if user.username else "N/A"}}
+        )
+    return user_data
 
-def check_join(user_id):
-    if user_id == ADMIN_ID: return True
-    not_joined = []
-    for channel in REQUIRED_CHANNELS:
-        try:
-            status = bot.get_chat_member(channel, user_id).status
+def is_banned(user_id):
+    u = users_col.find_one({"user_id": user_id})
+    return u.get("status") == "banned" if u else False
+
+def check_all_joined(user_id):
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        for ch in CHANNEL_USERNAMES:
+            status = bot.get_chat_member(ch, user_id).status
             if status not in ['member', 'administrator', 'creator']:
-                not_joined.append(channel)
-        except:
-            not_joined.append(channel)
-    return not_joined
+                return False
+        return True
+    except Exception as e:
+        logging.error(f"Join check error: {e}")
+        return False
 
 # --- ENGINE SETUP ---
 def bootstrap_engine():
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "hbctool" if not os.path.exists(WHL_FILE) else WHL_FILE])
+        if os.path.exists(WHL_FILE):
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", WHL_FILE])
+        else:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "hbctool"])
         import hbctool.hbc
         if 96 not in hbctool.hbc.HBC:
-            hbctool.hbc.HBC[96] = hbctool.hbc.HBC[max(hbctool.hbc.HBC.keys())]
-    except: pass
+            latest_v = max(hbctool.hbc.HBC.keys())
+            hbctool.hbc.HBC[96] = hbctool.hbc.HBC[latest_v]
+    except Exception as e:
+        logging.error(f"Engine bootstrap failed: {e}")
 
-# --- COMMAND HANDLERS ---
+# --- START COMMAND ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    is_new, u_data = sync_user(message.from_user)
-    
-    if u_data.get("status") == "banned":
-        return bot.reply_to(message, "🚫 <b>Access Denied!</b> You are banned from this system.")
+    user_id = message.from_user.id
+    if is_banned(user_id):
+        return bot.reply_to(message, "🚫 <b>You are restricted from using this bot!</b>")
 
-    not_joined = check_join(message.from_user.id)
-    if not_joined:
-        markup = types.InlineKeyboardMarkup()
-        for ch in not_joined:
-            markup.add(types.InlineKeyboardButton(f"📢 Join {ch}", url=f"https://t.me/{ch.replace('@','') }"))
-        markup.add(types.InlineKeyboardButton("🔄 Verify Membership", callback_data="verify"))
-        
-        caption = "<b>⚠️ ACCESS RESTRICTED!</b>\n\nTo use this premium engine, you must join all our official channels below."
-        return bot.send_photo(message.chat.id, IMG_URL, caption=caption, reply_markup=markup)
+    sync_user(message.from_user)
 
     welcome_text = (
-        f"<b>🚀 HERMES ENGINE ULTRA v96</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👋 <b>Welcome back,</b> {message.from_user.first_name}!\n"
-        f"💎 <b>Plan:</b> <code>Premium User</code>\n"
-        f"⚙️ <b>Engine Status:</b> <code>Ready to Work</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Reply to index.android.bundle with /disasmdem to start.</i>"
+        "<b>🚀 HERMES ENGINE ULTRA v96 ACTIVE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Welcome:</b> {message.from_user.first_name}\n"
+        "🛠 <b>Engine:</b> <code>Hermes Decompiler/Assembler</code>\n"
+        "💎 <b>Status:</b> <code>Premium Access</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Please select an option below:</i>"
     )
-    bot.send_photo(message.chat.id, IMG_URL, caption=welcome_text, reply_markup=get_main_keyboard(message.from_user.id))
 
-# --- CORE PROCESSING ---
-def process_engine(mode, message, status_msg):
-    global current_running_tasks
-    user_id = message.from_user.id
-    
-    # Check Concurrency (Admin Bypass)
-    if user_id != ADMIN_ID:
-        with task_lock:
-            if current_running_tasks >= MAX_CONCURRENT_TASKS:
-                bot.edit_message_text(f"⚠️ <b>Server Busy!</b>\n\nCurrently 5/5 users are processing. Please wait 1-2 minutes for a slot.", message.chat.id, status_msg.message_id)
-                return
-            current_running_tasks += 1
+    if check_all_joined(user_id):
+        bot.send_photo(message.chat.id, IMG_URL, caption=welcome_text, reply_markup=get_main_keyboard(user_id))
+    else:
+        bot.send_photo(
+            message.chat.id,
+            IMG_URL,
+            caption="<b>⚠️ ACCESS LOCKED!</b>\nYou must join <b>ALL</b> official channels to unlock the engine.",
+            reply_markup=generate_join_markup()
+        )
 
-    work_id = f"{user_id}_{int(time.time())}"
-    work_dir = f"work_{work_id}"
-    os.makedirs(work_dir, exist_ok=True)
-    
-    try:
-        import hbctool
-        start_time = time.time()
-        
-        # UI: Phase 1
-        bot.send_chat_action(message.chat.id, 'record_video_note')
-        bot.edit_message_text(f"📥 <b>Downloading Resource...</b>\n{get_progress_bar(20, '12.5 MB/s')}", message.chat.id, status_msg.message_id)
-        
-        file_info = bot.get_file(message.reply_to_message.document.file_id)
-        file_name = message.reply_to_message.document.file_name
-        downloaded = bot.download_file(file_info.file_path)
-        input_file = os.path.join(work_dir, "input_data")
-        with open(input_file, 'wb') as f: f.write(downloaded)
-
-        # UI: Phase 2 (Animation)
-        for i in range(30, 80, 15):
-            time.sleep(0.8)
-            bot.edit_message_text(f"⚙️ <b>Hermes v96 Processing...</b>\n{get_progress_bar(i, 'Processing...')}\n📂 <b>File:</b> <code>{file_name}</code>", message.chat.id, status_msg.message_id)
-
-        if mode == "disasm":
-            out_path = os.path.join(work_dir, "decompiled_source")
-            hbctool.disasm(input_file, out_path)
-            
-            zip_name = f"Decompiled_{user_id}.zip"
-            with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
-                for r, _, fs in os.walk(out_path):
-                    for f in fs: z.write(os.path.join(r, f), os.path.relpath(os.path.join(r, f), out_path))
-            
-            bot.send_chat_action(message.chat.id, 'upload_document')
-            duration = round(time.time() - start_time, 2)
-            with open(zip_name, 'rb') as f:
-                bot.send_document(message.chat.id, f, caption=f"✅ <b>Decompiled Successfully!</b>\n⏱ <b>Time:</b> <code>{duration}s</code>\n💎 <b>Engine:</b> <code>Hermes v96</code>")
-            os.remove(zip_name)
-        else:
-            extract_dir = os.path.join(work_dir, "asm_source")
-            with zipfile.ZipFile(input_file, 'r') as z: z.extractall(extract_dir)
-            bundle_out = os.path.join(work_dir, "index.android.bundle")
-            hbctool.asm(extract_dir, bundle_out)
-            
-            bot.send_chat_action(message.chat.id, 'upload_document')
-            duration = round(time.time() - start_time, 2)
-            with open(bundle_out, 'rb') as f:
-                bot.send_document(message.chat.id, f, caption=f"✅ <b>Assembled Successfully!</b>\n⏱ <b>Time:</b> <code>{duration}s</code>\n💎 <b>Engine:</b> <code>Hermes v96</code>")
-
-        users_col.update_one({"user_id": user_id}, {"$inc": {"total_tasks": 1}})
-        bot.delete_message(message.chat.id, status_msg.message_id)
-
-    except Exception as e:
-        bot.edit_message_text(f"❌ <b>ENGINE ERROR</b>\n<code>{str(e)}</code>", message.chat.id, status_msg.message_id)
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        if user_id != ADMIN_ID:
-            with task_lock:
-                current_running_tasks -= 1
-
-# --- CALLBACKS ---
+# --- CALLBACK HANDLERS ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     user_id = call.from_user.id
-    if call.data == "back_home":
-        start_cmd(call.message)
-        bot.delete_message(call.message.chat.id, call.message.message_id)
+    sync_user(call.from_user)
 
-    elif call.data == "verify":
-        if not check_join(user_id):
-            bot.answer_callback_query(call.id, "✅ Verified! You can use the bot now.", show_alert=True)
-            start_cmd(call.message)
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        else:
-            bot.answer_callback_query(call.id, "❌ Join all channels first!", show_alert=True)
+    if call.data == "back_home":
+        welcome_text = (
+            "<b>🚀 HERMES ENGINE ULTRA v96 ACTIVE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Welcome:</b> {call.from_user.first_name}\n"
+            "🛠 <b>Engine:</b> <code>Decompiler/Assembler</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        bot.edit_message_caption(welcome_text, call.message.chat.id, call.message.message_id, reply_markup=get_main_keyboard(user_id))
 
     elif call.data == "my_profile":
         u = users_col.find_one({"user_id": user_id})
-        text = (
-            f"<b>👤 USER PREMIUM PROFILE</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🆔 <b>ID:</b> <code>{u['user_id']}</code>\n"
-            f"⚡ <b>Total Tasks:</b> <code>{u['total_tasks']}</code>\n"
-            f"📅 <b>Joined:</b> <code>{u['joined_at']}</code>\n"
-            f"🏆 <b>Rank:</b> <code>Elite Member</code>"
+        profile = (
+            "<b>👤 USER PROFILE DATA</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <b>User ID:</b> <code>{u['user_id']}</code>\n"
+            f"🏷 <b>Name:</b> <code>{u['name']}</code>\n"
+            f"⚡ <b>Tasks Done:</b> <code>{u['total_tasks']}</code>\n"
+            f"📅 <b>Registration:</b> <code>{u['joined_at']}</code>\n"
+            f"💎 <b>Plan:</b> <code>PREMIUM</code>"
         )
-        bot.edit_message_caption(text, call.message.chat.id, call.message.message_id, reply_markup=back_btn())
+        bot.edit_message_caption(profile, call.message.chat.id, call.message.message_id, reply_markup=back_btn())
 
-    elif call.data == "live_tasks":
+    elif call.data == "help_cmd":
+        help_text = (
+            "<b>📜 ENGINE COMMAND LIST</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ <code>/disasmdem</code> - Reply to <i>index.android.bundle</i> to decompile.\n"
+            "⚡ <code>/asmdem</code> - Reply to your <i>zipped source</i> to compile.\n"
+            "⚡ <code>/start</code> - Refresh the bot interface.\n"
+            "⚡ <code>/stats</code> - Show global engine statistics.\n\n"
+            "<i>Note: Make sure your zip file structure is correct.</i>"
+        )
+        bot.edit_message_caption(help_text, call.message.chat.id, call.message.message_id, reply_markup=back_btn())
+
+    elif call.data == "bot_stats":
+        total_u = users_col.count_documents({})
+        agg = list(users_col.aggregate([{"$group": {"_id": None, "total": {"$sum": "$total_tasks"}}}]))
+        total_t = agg[0]['total'] if agg else 0
+        active_count = len(active_users)
+        stats_text = (
+            "<b>📊 ENGINE GLOBAL STATS</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 Total Users: <code>{total_u}</code>\n"
+            f"⚙️ Tasks Completed: <code>{total_t}</code>\n"
+            f"🟢 Active Users: <code>{active_count}/{MAX_CONCURRENT_USERS}</code>\n"
+            "🛰 Server Status: <code>Running Smoothly</code>"
+        )
+        bot.edit_message_caption(stats_text, call.message.chat.id, call.message.message_id, reply_markup=back_btn())
+
+    elif call.data == "verify":
+        if check_all_joined(user_id):
+            bot.answer_callback_query(call.id, "✅ Verified! Welcome back.", show_alert=True)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            start_cmd(call.message)
+        else:
+            bot.answer_callback_query(call.id, "❌ Not joined all channels yet!", show_alert=True)
+
+    elif call.data == "admin_panel" and user_id == ADMIN_ID:
+        adm_text = (
+            "<b>🛠 ADMIN CONTROL PANEL</b>\n\n"
+            "• <code>/broadcast [text]</code> - Message all users\n"
+            "• <code>/ban [ID]</code> - Ban a user\n"
+            "• <code>/unban [ID]</code> - Unban user\n"
+            "• <code>/stats</code> - Detailed database stats\n"
+            "• <code>/listbans</code> - List banned users\n"
+            "• <code>/reload</code> - Reload engine (dev only)"
+        )
+        bot.edit_message_caption(adm_text, call.message.chat.id, call.message.message_id, reply_markup=back_btn())
+
+# --- CONCURRENCY CHECKER ---
+def can_process(user_id):
+    if user_id == ADMIN_ID:
+        return True
+    if len(active_users) >= MAX_CONCURRENT_USERS:
+        return False
+    return True
+
+def add_active_user(user_id):
+    if user_id != ADMIN_ID:
+        active_users.add(user_id)
+
+def remove_active_user(user_id):
+    if user_id != ADMIN_ID:
+        active_users.discard(user_id)
+
+# --- CORE ENGINE PROCESSING ---
+def process_engine(mode, message, status_msg):
+    user_id = message.from_user.id
+    if not can_process(user_id):
+        bot.edit_message_text(
+            f"⚠️ <b>Server Busy!</b>\nMaximum {MAX_CONCURRENT_USERS} users allowed simultaneously.\n"
+            "Please wait or try again later.",
+            message.chat.id, status_msg.message_id
+        )
+        return
+
+    add_active_user(user_id)
+    work_id = f"{user_id}_{int(time.time())}"
+    work_dir = f"workspace_{work_id}"
+    os.makedirs(work_dir, exist_ok=True)
+
+    try:
+        import hbctool
+        users_col.update_one({"user_id": user_id}, {"$inc": {"total_tasks": 1}})
+
+        # File info
+        doc = message.reply_to_message.document
+        file_size_mb = round(doc.file_size / (1024 * 1024), 2)
+        file_name = doc.file_name or "Unknown"
+
+        # Phase 1: Download
+        bot.send_chat_action(message.chat.id, 'typing')
+        bot.edit_message_text(
+            f"📥 <b>Downloading...</b>\n📁 <code>{file_name}</code>\n💾 <code>{file_size_mb} MB</code>\n{get_progress_bar(20)}",
+            message.chat.id, status_msg.message_id
+        )
+
+        file_info = bot.get_file(doc.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        input_file = os.path.join(work_dir, "input_data")
+        with open(input_file, 'wb') as f:
+            f.write(downloaded)
+
+        if mode == "disasm":
+            # Phase 2: Decompile
+            bot.send_chat_action(message.chat.id, 'typing')
+            bot.edit_message_text(
+                f"⚙️ <b>Decompiling (v96)...</b>\n{get_progress_bar(50)}\n⏳ Processing Hermes bytecode...",
+                message.chat.id, status_msg.message_id
+            )
+            out_path = os.path.join(work_dir, "out")
+            hbctool.disasm(input_file, out_path)
+
+            # Phase 3: Zip
+            bot.send_chat_action(message.chat.id, 'upload_document')
+            bot.edit_message_text(
+                f"📦 <b>Packing result...</b>\n{get_progress_bar(80)}",
+                message.chat.id, status_msg.message_id
+            )
+            zip_name = f"Decompiled_{user_id}.zip"
+            with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
+                for root, _, files in os.walk(out_path):
+                    for f in files:
+                        z.write(os.path.join(root, f), os.path.relpath(os.path.join(root, f), out_path))
+
+            # Phase 4: Send
+            with open(zip_name, 'rb') as f:
+                bot.send_document(message.chat.id, f, caption="✅ <b>Decompiled successfully by Hermes Engine.</b>")
+            os.remove(zip_name)
+
+        else:  # Assemble
+            bot.send_chat_action(message.chat.id, 'typing')
+            bot.edit_message_text(
+                f"⚙️ <b>Assembling (v96)...</b>\n{get_progress_bar(50)}\n⏳ Rebuilding bundle...",
+                message.chat.id, status_msg.message_id
+            )
+            extract_dir = os.path.join(work_dir, "extract")
+            with zipfile.ZipFile(input_file, 'r') as z:
+                z.extractall(extract_dir)
+
+            bundle_out = os.path.join(work_dir, "index.android.bundle")
+            hbctool.asm(extract_dir, bundle_out)
+
+            bot.send_chat_action(message.chat.id, 'upload_document')
+            bot.edit_message_text(
+                f"📤 <b>Sending compiled bundle...</b>\n{get_progress_bar(90)}",
+                message.chat.id, status_msg.message_id
+            )
+            with open(bundle_out, 'rb') as f:
+                bot.send_document(message.chat.id, f, caption="✅ <b>Compiled successfully by Hermes Engine.</b>")
+
+        bot.delete_message(message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ <b>ENGINE ERROR:</b>\n<code>{str(e)[:300]}</code>", message.chat.id, status_msg.message_id)
+    finally:
+        remove_active_user(user_id)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+# --- USER COMMANDS ---
+@bot.message_handler(commands=['disasmdem', 'asmdem'])
+def handle_engine_commands(message):
+    if is_banned(message.from_user.id) or not check_all_joined(message.from_user.id):
+        return
+
+    if not message.reply_to_message or not message.reply_to_message.document:
+        return bot.reply_to(message, "❌ <b>Invalid Input!</b> Please reply to a bundle or zip file.")
+
+    mode = "disasm" if message.text == "/disasmdem" else "asm"
+    status = bot.send_message(message.chat.id, "🚀 <b>Initializing Hermes Engine...</b>")
+    threading.Thread(target=process_engine, args=(mode, message, status), daemon=True).start()
+
+# --- EXTRA COMMANDS ---
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    total_u = users_col.count_documents({})
+    agg = list(users_col.aggregate([{"$group": {"_id": None, "total": {"$sum": "$total_tasks"}}}]))
+    total_t = agg[0]['total'] if agg else 0
+    active_count = len(active_users)
+    bot.reply_to(
+        message,
+        f"📊 <b>ENGINE STATISTICS</b>\n\n"
+        f"👥 Total Users: <code>{total_u}</code>\n"
+        f"⚙️ Tasks Completed: <code>{total_t}</code>\n"
+        f"🟢 Active Now: <code>{active_count}/{MAX_CONCURRENT_USERS}</code>"
+    )
+
+# --- ADMIN COMMANDS ---
+@bot.message_handler(commands=['broadcast'])
+def broadcast_handler(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.replace("/broadcast ", "").strip()
+    if not text:
+        return bot.reply_to(message, "Usage: /broadcast [message]")
+    users = users_col.find({"status": {"$ne": "banned"}})
+    count = 0
+    for u in users:
+        try:
+            bot.send_message(u['user_id'], f"📢 <b>ANNOUNCEMENT:</b>\n\n{text}")
+            count += 1
+        except:
+            pass
+    bot.send_message(ADMIN_ID, f"✅ Broadcast sent to {count} users.")
+
+@bot.message_handler(commands=['ban'])
+def ban_user(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        tid = int(message.text.split()[1])
+        users_col.update_one({"user_id": tid}, {"$set": {"status": "banned"}})
+        bot.reply_to(message, f"🚫 User {tid} has been banned.")
+    except:
+        bot.reply_to(message, "Usage: /ban [USER_ID]")
+
+@bot.message_handler(commands=['unban'])
+def unban_user(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        tid = int(message.text.split()[1])
+        users_col.update_one({"user_id": tid}, {"$set": {"status": "active"}})
+        bot.reply_to(message, f"✅ User {tid} has been unbanned.")
+    except:
+        bot.reply_to(message, "Usage: /unban [USER_ID]")
+
+@bot.message_handler(commands=['listbans'])
+def list_bans(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    banned = users_col.find({"status": "banned"})
+    ids = [str(u['user_id']) for u in banned]
+    if not ids:
+        bot.reply_to(message, "No banned users.")
+    else:
+        bot.reply_to(message, f"Banned IDs:\n<code>{', '.join(ids)}</code>")
+
+@bot.message_handler(commands=['reload'])
+def reload_engine(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    bot.reply_to(message, "🔄 Reloading engine...")
+    bootstrap_engine()
+    bot.send_message(ADMIN_ID, "✅ Engine reloaded!")
+
+# --- START BOT ---
+if __name__ == "__main__":
+    bootstrap_engine()
+    print("✨ Hermes Engine Ultra v96 Started Successfully!")
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)"live_tasks":
         bot.answer_callback_query(call.id, f"Current Load: {current_running_tasks}/{MAX_CONCURRENT_TASKS} Users")
 
     elif call.data == "admin_panel" and user_id == ADMIN_ID:
