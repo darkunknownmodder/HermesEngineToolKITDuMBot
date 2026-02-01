@@ -13,11 +13,11 @@ from pymongo import MongoClient
 
 # --- CONFIGURATION ---
 TOKEN = "8536451561:AAFIuJAuATjo0WnzhgQAtV73mFx_0adS-kg"
-ADMIN_ID = 7498487211
+ADMIN_ID = 8504263842
 CHANNEL_USERNAME = "@darkunknownmodder"
 CHANNEL_URL = "https://t.me/darkunknownmodder"
 WHL_FILE = "hbctool-0.1.5-96-py3-none-any.whl"
-IMG_URL = "https://raw.githubusercontent.com/darkepicmoddder/Drive-DeM/refs/heads/main/Img/toolkit.jpg"
+IMG_URL = "https://raw.githubusercontent.com/darkunknownmodder/Drive-DuM/refs/heads/main/Img/Gemini_Generated_Image_rbwl3prbwl3prbwl-picsay.png"
 
 # --- MONGODB CONNECTION ---
 raw_uri = "mongodb+srv://darkunknownmodder:" + urllib.parse.quote_plus("%#DuM404%App@#%") + "@cluster0.w2fubew.mongodb.net/?appName=Cluster0"
